@@ -4,16 +4,16 @@ import collections
 import pandas as pd
 
 # 설정값
-csv_dir   = "csv"       # <- 여기에 CSV 파일이 모여 있는 폴더
+csv_dir   = "csv"
 outdir    = "outputs"   # 결과 저장 폴더
-text_col  = None        # None이면 자동 감지
+text_col  = None        # None이면 자동 감지, 결측치
 topn      = 50
 analyzer  = "okt"       # "okt" | "kkma" | "regex"
 min_len   = 2
 stopwords = {"제주","제주도"}  # 기본 불용어 (원하면 확장 가능)
 font_path = r"C:\Windows\Fonts\malgun.ttf"   # 워드클라우드 폰트
 
-# 토크나이저
+# 토크나이저 (텍스트를 단어 토큰으로 변환 | ex: okt.nouns())
 
 def get_tokenizer(analyzer="okt"):
     if analyzer == "regex":
