@@ -1,18 +1,38 @@
+# -*- coding: utf-8 -*-
+"""
+통합 분석 스크립트
+- 여러 CSV 병합(pd.concat)
+- 텍스트 컬럼 자동 감지(없으면 지정)
+- 키워드(명사) 빈도 / 장소 추출
+- 워드클라우드 생성 (Windows: malgun.ttf 사용)
+- 요구사항: 키워드 빈도에서 '제주', '제주도' 제외
+
+필요 패키지:
+    pip install pandas konlpy wordcloud matplotlib jpype1
+"""
+
 import os
 import re
 import collections
 import pandas as pd
 
-csv_path   = "csv/JT_SNS_KWRD_STATS_LIST_202312.csv"
-outdir     = "outputs"
-text_col   = None         # None이면 자동 감지
-topn       = 50
-analyzer   = "okt"        # "okt" | "kkma" | "regex"
-min_len    = 2
-stopwords_file = None     # 불용어 파일 경로 (.txt, 줄 단위)
-place_suffix_file = None  # 장소 접미사 확장 파일
-font_path  = r"C:\Windows\Fonts\malgun.ttf"  # 맑은 고딕 TTF
+# ====== 입력 CSV들 ======
+csv_paths = [
+    "csv/JT_SNS_KWRD_STATS_LIST_202206.csv",
+    "csv/JT_SNS_KWRD_STATS_LIST_202212.csv",
+    "csv/JT_SNS_KWRD_STATS_LIST_202306.csv",
+    "csv/JT_SNS_KWRD_STATS_LIST_202312.csv",
+]
 
+# ====== 설정 ======
+outdir     = "outputs_all"
+text_col   = None          # None이면 자동 감지
+topn       = 50
+analyzer   = "okt"         # "okt" | "kkma" | "regex"
+min_len    = 2
+stopwords_file = None      # 외부 불용어 파일(.txt, 줄 단위) — 선택
+place_suffix_file = None   # 장소 접미사 확장 파일 — 선택
+font_path  = r"C:\Windows\Fonts\malgun.ttf"  # 워드클라우드 폰트(Windows TTF)
 
 # ====== Tokenizer 준비 ======
 def get_tokenizer(analyzer: str = "okt"):
@@ -43,6 +63,7 @@ def extract_nouns(text, kind, obj, min_len=2):
             return [w for w in obj.nouns(text) if len(w) >= min_len]
         except:
             pass
+    # Fallback: 한글 2자 이상
     return re.findall(r"[가-힣]{%d,}" % min_len, text)
 
 # ====== 장소 추출 ======
@@ -109,33 +130,51 @@ def try_wordcloud(freqs, out_png, font_path=None):
 
 # ================== 실행부 ==================
 if __name__ == "__main__":
-    # Load
-    df = pd.read_csv(csv_path, encoding="utf-8", low_memory=False)
+    os.makedirs(outdir, exist_ok=True)
 
-    # Text column
+    # 1) 여러 CSV 로드 + 합치기
+    dfs = []
+    for p in csv_paths:
+        if not os.path.exists(p):
+            print(f"[WARN] 파일 없음: {p} (건너뜀)")
+            continue
+        df_i = pd.read_csv(p, encoding="utf-8", low_memory=False)
+        df_i["SOURCE"] = os.path.basename(p).replace(".csv","")
+        dfs.append(df_i)
+
+    if not dfs:
+        raise SystemExit("[ERR] 읽을 수 있는 CSV가 없습니다.")
+
+    df = pd.concat(dfs, ignore_index=True)
+    print(f"[INFO] 합쳐진 데이터: {df.shape}")
+
+    # 2) 텍스트 컬럼 결정
     if text_col is None:
         text_col = autodetect_text_column(df)
     print(f"[INFO] 텍스트 컬럼: {text_col}")
 
     texts = df[text_col].fillna("").astype(str).tolist()
 
-    # Tokenizer
+    # 3) 토크나이저
     kind, obj = get_tokenizer(analyzer)
 
-    # Stopwords
+    # 4) 불용어
     stopwords = set()
     if stopwords_file and os.path.exists(stopwords_file):
         with open(stopwords_file, "r", encoding="utf-8") as f:
             stopwords = {ln.strip() for ln in f if ln.strip()}
 
-    # Nouns
+    # ✅ 키워드 빈도에서 '제주', '제주도' 제외
+    stopwords.update({"제주", "제주도"})
+
+    # 5) 명사 카운트 (키워드)
     noun_counter = collections.Counter()
     for t in texts:
         nouns = extract_nouns(t, kind, obj, min_len=min_len)
         nouns = [w for w in nouns if w not in stopwords]
         noun_counter.update(nouns)
 
-    # Places
+    # 6) 장소 카운트 (장소에서는 '제주/제주도'를 제외하지 않음)
     place_suffixes = DEFAULT_PLACE_SUFFIXES[:]
     if place_suffix_file and os.path.exists(place_suffix_file):
         with open(place_suffix_file, "r", encoding="utf-8") as f:
@@ -146,26 +185,54 @@ if __name__ == "__main__":
     for t in texts:
         place_counter.update(extract_places(t, place_regex))
 
-    # Save outputs
-    os.makedirs(outdir, exist_ok=True)
-
+    # 7) 전체 결과 저장
     kw_df = pd.DataFrame(noun_counter.most_common(topn), columns=["keyword","count"])
-    kw_df.to_csv(os.path.join(outdir,"keyword_frequencies.csv"), index=False, encoding="utf-8")
+    kw_df.to_csv(os.path.join(outdir,"keyword_frequencies_all.csv"), index=False, encoding="utf-8")
 
     place_df = pd.DataFrame(place_counter.most_common(topn), columns=["place","count"])
-    place_df.to_csv(os.path.join(outdir,"place_frequencies.csv"), index=False, encoding="utf-8")
+    place_df.to_csv(os.path.join(outdir,"place_frequencies_all.csv"), index=False, encoding="utf-8")
 
-    preview = df[[text_col]].copy()
+    # 8) 행별 미리보기 (상위 20/10)
+    preview = df[[text_col, "SOURCE"]].copy()
     preview["extracted_nouns_top20"] = df[text_col].astype(str).apply(
-        lambda t: " ".join(extract_nouns(t, kind, obj, min_len=min_len)[:20])
+        lambda t: " ".join([w for w in extract_nouns(t, kind, obj, min_len=min_len) if w not in stopwords][:20])
     )
     preview["extracted_places_top10"] = df[text_col].astype(str).apply(
         lambda t: " | ".join(extract_places(t, place_regex)[:10])
     )
+    preview.to_csv(os.path.join(outdir,"extracted_per_row_all.csv"), index=False, encoding="utf-8")
 
-    wc_png = os.path.join(outdir,"wordcloud.png")
+    # 9) SOURCE(파일별) TopN도 추가 저장
+    # SOURCE별 키워드
+    source_kw_rows = []
+    for src, sub in df.groupby("SOURCE"):
+        sub_nouns = []
+        for t in sub[text_col].fillna(""):
+            ns = extract_nouns(t, kind, obj, min_len=min_len)
+            ns = [w for w in ns if w not in stopwords]  # 제주/제주도 제외 유지
+            sub_nouns.extend(ns)
+        c = collections.Counter(sub_nouns).most_common(topn)
+        for k, v in c:
+            source_kw_rows.append({"SOURCE": src, "keyword": k, "count": v})
+    pd.DataFrame(source_kw_rows).to_csv(os.path.join(outdir,"keyword_frequencies_by_source.csv"),
+                                        index=False, encoding="utf-8")
+
+    # SOURCE별 장소
+    source_place_rows = []
+    for src, sub in df.groupby("SOURCE"):
+        sub_places = []
+        for t in sub[text_col].fillna(""):
+            sub_places.extend(extract_places(t, place_regex))
+        c = collections.Counter(sub_places).most_common(topn)
+        for k, v in c:
+            source_place_rows.append({"SOURCE": src, "place": k, "count": v})
+    pd.DataFrame(source_place_rows).to_csv(os.path.join(outdir,"place_frequencies_by_source.csv"),
+                                           index=False, encoding="utf-8")
+
+    # 10) 워드클라우드 (전체 키워드)
+    wc_png = os.path.join(outdir,"wordcloud_all.png")
     msg = try_wordcloud(dict(noun_counter.most_common(200)), wc_png, font_path=font_path)
     print("[WordCloud]", msg)
 
     print("=== Done ===")
-    print("Outputs in:", outdir)
+    print("Outputs in:", os.path.abspath(outdir))
